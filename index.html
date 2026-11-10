@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Strom Schweiz live</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<style>
+  :root{
+    --bg:#10161c; --panel:#18212a; --line:#27333f; --text:#e8eef3; --mute:#8fa1b0;
+    --nuc:#e0b23c; --res:#3b8fe0; --pump:#7a6fe0; --ror:#3cc4c0; --sol:#f2d33b; --wind:#8bd36a; --oth:#a0a8b0;
+    --imp:#ff8a3d; --exp:#4cd68a;
+  }
+  @media (prefers-color-scheme: light){
+    :root{--bg:#eef2f5;--panel:#fff;--line:#d7dfe6;--text:#16222c;--mute:#5d6f7e;}
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
+  .app{display:grid;grid-template-columns:380px 1fr;height:100%}
+  aside{background:var(--panel);border-right:1px solid var(--line);padding:16px;overflow:auto;display:flex;flex-direction:column;gap:14px}
+  h1{font-size:18px;margin:0}
+  .sub{color:var(--mute);font-size:12px}
+  .kpis{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .kpi{border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .kpi b{display:block;font-size:24px;font-variant-numeric:tabular-nums}
+  .kpi span{font-size:12px;color:var(--mute)}
+  .kpi.net b.imp{color:var(--imp)} .kpi.net b.exp{color:var(--exp)}
+  .bar{display:flex;height:16px;border-radius:8px;overflow:hidden;background:var(--line)}
+  .bar i{display:block;height:100%}
+  .legend{list-style:none;margin:0;padding:0;display:grid;gap:5px}
+  .legend li{display:flex;align-items:center;gap:8px;font-size:13px}
+  .legend .dot{width:10px;height:10px;border-radius:50%}
+  .legend .v{margin-left:auto;font-variant-numeric:tabular-nums}
+  .legend .p{color:var(--mute);width:42px;text-align:right;font-variant-numeric:tabular-nums}
+  canvas{width:100%;height:170px;display:block}
+  #map{height:100%;min-height:300px;background:var(--bg)}
+  .note{font-size:11px;color:var(--mute)}
+  .err{background:#5a1d1d;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;display:none}
+  .flowlabel{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:2px 8px;font-size:12px;font-weight:600;white-space:nowrap;text-align:center;transform:translate(-50%,-50%);width:max-content}
+  .flowlabel small{display:block;font-weight:400;color:var(--mute)}
+  .flow{stroke-dasharray:10 14;animation:dash 1s linear infinite}
+  .flow.rev{animation-direction:reverse}
+  @keyframes dash{to{stroke-dashoffset:-24}}
+  @media (prefers-reduced-motion: reduce){.flow{animation:none}}
+  .leaflet-popup-content-wrapper,.leaflet-popup-tip{background:var(--panel);color:var(--text)}
+  @media (max-width:800px){
+    .app{grid-template-columns:1fr;grid-template-rows:55vh auto;height:auto}
+    #map{height:55vh} aside{border-right:0;border-top:1px solid var(--line);order:2}
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div>
+      <h1>⚡ Strom Schweiz live</h1>
+      <div class="sub" id="stamp">Lade Daten …</div>
+    </div>
+    <div class="err" id="err"></div>
+    <div class="kpis">
+      <div class="kpi"><b id="kProd">–</b><span>Produktion</span></div>
+      <div class="kpi"><b id="kLoad">–</b><span>Verbrauch</span></div>
+      <div class="kpi net"><b id="kNet">–</b><span id="kNetL">Import / Export</span></div>
+      <div class="kpi"><b id="kRen">–</b><span>Erneuerbar (Anteil Produktion)</span></div>
+    </div>
+    <div>
+      <div class="bar" id="bar"></div>
+      <ul class="legend" id="legend" style="margin-top:10px"></ul>
+    </div>
+    <div>
+      <div class="sub" style="margin-bottom:4px">Verlauf (letzte ~36 h, Produktion gestapelt, Linie = Verbrauch)</div>
+      <canvas id="chart"></canvas>
+    </div>
+    <div class="note">
+      Quelle: Swissgrid / ENTSO-E über <a href="https://energy-charts.info" style="color:inherit">Energy-Charts</a> (Fraunhofer ISE).
+      Die Daten sind nicht sekundengenau: Produktion stündlich, Grenzflüsse alle 15&nbsp;min, mit einigen Stunden Verzögerung.
+      Die Leistung der einzelnen Kraftwerke ist <b>geschätzt</b> (Landesproduktion je Typ im Verhältnis zur installierten Leistung) – echte Einzelwerte gibt es nur mit ENTSO-E-API-Schlüssel.
+      Karte: © swisstopo.
+    </div>
+  </aside>
+  <div id="map"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script>
+"use strict";
+// ---------- Typen ----------
+const TYPES = {
+  nuc : {label:'Kernkraft',            color:'#e0b23c', api:'Nuclear',             inst:'Nuclear'},
+  res : {label:'Speicherkraft',        color:'#3b8fe0', api:'Hydro water reservoir', inst:'Hydro water reservoir'},
+  pump: {label:'Pumpspeicher',         color:'#7a6fe0', api:'Hydro pumped storage', inst:'Hydro pumped storage'},
+  ror : {label:'Laufwasser',           color:'#3cc4c0', api:'Hydro Run-of-River',   inst:'Hydro Run-of-River'},
+  sol : {label:'Solar',                color:'#f2d33b', api:'Solar',               inst:'Solar DC'},
+  wind: {label:'Wind',                 color:'#8bd36a', api:'Wind onshore',        inst:'Wind onshore'},
+  oth : {label:'Übrige (Biomasse, KVA, Thermisch)', color:'#a0a8b0', api:'Others', inst:null},
+};
+
+// ---------- Kraftwerke (grösste Anlagen, Koordinaten ungefähr) ----------
+const PLANTS = [
+  // Kernkraft
+  {n:'KKW Gösgen',      t:'nuc', mw:1010, ll:[47.3664, 7.9680]},
+  {n:'KKW Leibstadt',   t:'nuc', mw:1220, ll:[47.6008, 8.1819]},
+  {n:'KKW Beznau (2 Blöcke)', t:'nuc', mw:740, ll:[47.5517, 8.2283]},
+  // Speicher
+  {n:'Bieudron / Cleuson-Dixence (Grande Dixence)', t:'res', mw:1269, ll:[46.1860, 7.2370]},
+  {n:'Mauvoisin / Fionnay', t:'res', mw:363, ll:[46.0130, 7.3250]},
+  {n:'Handeck / Innertkirchen (KWO)', t:'res', mw:600, ll:[46.7200, 8.2300]},
+  {n:'Hinterrhein (Sils / Bärenburg)', t:'res', mw:650, ll:[46.6900, 9.4400]},
+  {n:'Fully',           t:'res', mw:218, ll:[46.1400, 7.1100]},
+  {n:'Chandoline',      t:'res', mw:120, ll:[46.2300, 7.3600]},
+  {n:'Maggia (Cavergno / Peccia)', t:'res', mw:300, ll:[46.3300, 8.6000]},
+  {n:'Göschenen / Göscheneralp', t:'res', mw:180, ll:[46.6700, 8.5900]},
+  {n:'Zervreila / Rabiusa', t:'res', mw:150, ll:[46.5900, 9.1200]},
+  {n:'Prättigau (Küblis)', t:'res', mw:150, ll:[46.9100, 9.7700]},
+  {n:'Ritom / Piottino',t:'res', mw:100, ll:[46.5100, 8.7000]},
+  {n:'Tierfehd / Linth-Limmern', t:'res', mw:480, ll:[46.8800, 8.9800]},
+  // Pumpspeicher
+  {n:'Linthal 2015',    t:'pump', mw:1000, ll:[46.9190, 9.0000]},
+  {n:'Nant de Drance',  t:'pump', mw:900,  ll:[46.0680, 6.9700]},
+  {n:'Grimsel 2 / Oberaar', t:'pump', mw:350, ll:[46.5900, 8.3200]},
+  {n:'Etzel',           t:'pump', mw:140,  ll:[47.1500, 8.7700]},
+  {n:'Wägital',         t:'pump', mw:110,  ll:[47.1500, 8.9000]},
+  {n:'Robiei',          t:'pump', mw:390,  ll:[46.4400, 8.5000]},
+  // Laufwasser
+  {n:'Laufenburg',      t:'ror', mw:106, ll:[47.5600, 8.0600]},
+  {n:'Rheinfelden',     t:'ror', mw:100, ll:[47.5600, 7.7900]},
+  {n:'Birsfelden',      t:'ror', mw:100, ll:[47.5500, 7.6500]},
+  {n:'Ryburg-Schwörstadt', t:'ror', mw:120, ll:[47.5600, 7.9200]},
+  {n:'Augst-Wyhlen',    t:'ror', mw:80,  ll:[47.5400, 7.7000]},
+  {n:'Rekingen / Eglisau', t:'ror', mw:80, ll:[47.5700, 8.4200]},
+  {n:'Aare Rupperswil-Auenstein', t:'ror', mw:45, ll:[47.4100, 8.1000]},
+  {n:'Aare Wynau / Bannwil', t:'ror', mw:70, ll:[47.2500, 7.7800]},
+  {n:'Rhône Chancy-Pougny', t:'ror', mw:55, ll:[46.1500, 5.9700]},
+  {n:'Rhône Verbois',   t:'ror', mw:100, ll:[46.2000, 6.0200]},
+  // Wind
+  {n:'Mont Crosin (Wind)', t:'wind', mw:37, ll:[47.1700, 7.0000]},
+];
+
+// Nachbarländer: Position auf der Karte und Pfeil
+const BORDERS = {
+  Germany: {de:'Deutschland', from:[47.62,8.45], to:[48.0,8.95]},
+  France : {de:'Frankreich',  from:[46.85,6.8], to:[46.9,6.05]},
+  Italy  : {de:'Italien',     from:[46.05,8.85], to:[45.6,9.05]},
+  Austria: {de:'Österreich',  from:[47.20,9.60], to:[47.2,10.75]},
+};
+
+// ---------- Hilfen ----------
+const $ = id => document.getElementById(id);
+const fmtMW = v => Math.abs(v) >= 1000 ? (v/1000).toFixed(2).replace('.',',') + ' GW' : Math.round(v) + ' MW';
+const fmtTime = s => new Date(s*1000).toLocaleString('de-CH',{weekday:'short',hour:'2-digit',minute:'2-digit'});
+const lastIdx = arr => { for (let i=arr.length-1;i>=0;i--) if (arr[i]!=null) return i; return -1; };
+
+// ---------- Karte ----------
+const map = L.map('map',{zoomControl:true,attributionControl:true,minZoom:6,maxZoom:12}).fitBounds([[45.45,5.5],[48.1,10.9]],{padding:[10,10]});
+L.tileLayer('https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-grau/default/current/3857/{z}/{x}/{y}.jpeg',
+  {attribution:'© <a href="https://www.swisstopo.admin.ch">swisstopo</a>',maxZoom:19}).addTo(map);
+const plantLayer = L.layerGroup().addTo(map);
+const flowLayer = L.layerGroup().addTo(map);
+
+const state = {ratios:{}};
+
+function drawPlants(){
+  plantLayer.clearLayers();
+  for (const p of PLANTS){
+    const T = TYPES[p.t];
+    const r = 4 + Math.sqrt(p.mw)*0.55;
+    const ratio = state.ratios[p.t] ?? 0;
+    const est = p.mw*ratio;
+    L.circleMarker(p.ll,{radius:r,color:T.color,weight:1.5,fillColor:T.color,fillOpacity:.12}).addTo(plantLayer);
+    const inner = L.circleMarker(p.ll,{radius:Math.max(2,r*Math.sqrt(ratio)),color:'#000',weight:.5,fillColor:T.color,fillOpacity:.9});
+    inner.bindPopup(`<b>${p.n}</b><br>${T.label}<br>Installiert: ${fmtMW(p.mw)}<br>Aktuell (geschätzt): ≈ ${fmtMW(est)} (${Math.round(ratio*100)} %)`);
+    inner.addTo(plantLayer);
+  }
+}
+
+function drawFlows(cb, idx){
+  flowLayer.clearLayers();
+  for (const c of cb.countries){
+    const b = BORDERS[c.name]; if (!b) continue;
+    const v = c.data[idx]; if (v==null) continue;   // GW, >0 = Export aus der CH
+    const exp = v > 0, mw = Math.abs(v)*1000;
+    const w = 2 + Math.min(10, Math.abs(v)*2.5);
+    const col = exp ? '#4cd68a' : '#ff8a3d';
+    L.polyline([b.from,b.to],{color:col,weight:w,opacity:.85,className:'flow'+(exp?'':' rev'),interactive:false}).addTo(flowLayer);
+    const mid = [(b.from[0]+b.to[0])/2,(b.from[1]+b.to[1])/2];
+    L.marker(b.to,{interactive:false,icon:L.divIcon({className:'',html:
+      `<div class="flowlabel" style="border-color:${col}">${b.de}<br>${fmtMW(mw)}<small>${mw<1?'–':(exp?'Export ➜':'⬅ Import')}</small></div>`})}).addTo(flowLayer);
+  }
+}
+
+// ---------- Panel ----------
+function drawPanel(pw, instArr){
+  const names = Object.fromEntries(pw.production_types.map(t=>[t.name,t.data]));
+  const iP = lastIdx(names['Load'] || []);
+  const idx = Math.min(iP >= 0 ? iP : pw.unix_seconds.length-1, pw.unix_seconds.length-1);
+  const val = n => { const a = names[n]; return a && a[idx]!=null ? a[idx] : 0; };
+
+  const items = [];
+  let prod = 0;
+  for (const k of Object.keys(TYPES)){
+    let v = Math.max(0,val(TYPES[k].api));
+    items.push({k,v}); prod += v;
+  }
+  const load = val('Load');
+  const renShare = names['Renewable share of generation'] ? val('Renewable share of generation') : null;
+  $('kProd').textContent = fmtMW(prod);
+  $('kLoad').textContent = fmtMW(load);
+  $('kRen').textContent = renShare!=null ? Math.round(renShare)+' %' : '–';
+  $('stamp').textContent = 'Produktionsdaten: ' + fmtTime(pw.unix_seconds[idx]) + ' · aktualisiert ' + new Date().toLocaleTimeString('de-CH',{hour:'2-digit',minute:'2-digit'});
+
+  $('bar').innerHTML = items.map(i=>`<i style="width:${prod? i.v/prod*100:0}%;background:${TYPES[i.k].color}" title="${TYPES[i.k].label}"></i>`).join('');
+  $('legend').innerHTML = items.map(i=>`<li><span class="dot" style="background:${TYPES[i.k].color}"></span>${TYPES[i.k].label}<span class="v">${fmtMW(i.v)}</span><span class="p">${prod? Math.round(i.v/prod*100):0} %</span></li>`).join('');
+
+  // Schätzung je Kraftwerk: Landesproduktion / installierte Leistung
+  state.ratios = {};
+  for (const k of Object.keys(TYPES)){
+    const inst = instArr[TYPES[k].inst];
+    if (inst) state.ratios[k] = Math.max(0,Math.min(1, Math.max(0,val(TYPES[k].api)) / (inst*1000)));
+  }
+  drawPlants();
+  drawChart(pw, names);
+}
+
+function drawChart(pw, names){
+  const cv = $('chart'), dpr = window.devicePixelRatio||1;
+  const W = cv.clientWidth, H = cv.clientHeight; cv.width = W*dpr; cv.height = H*dpr;
+  const g = cv.getContext('2d'); g.scale(dpr,dpr); g.clearRect(0,0,W,H);
+  const n = pw.unix_seconds.length;
+  const last = Math.max(0, lastIdx(names['Load']||[]));
+  const m = last+1;
+  const keys = ['nuc','ror','res','pump','wind','sol','oth'];
+  const stacks = Array.from({length:m},(_,i)=>{ let s=0; return keys.map(k=>{ s += Math.max(0,(names[TYPES[k].api]||[])[i]||0); return s; }); });
+  const load = names['Load']||[];
+  const max = Math.max(1000, ...stacks.map(s=>s[s.length-1]), ...load.slice(0,m).map(v=>v||0))*1.08;
+  const pad = {l:34,r:4,t:6,b:16};
+  const X = i => pad.l + (W-pad.l-pad.r)*(m>1? i/(m-1):0);
+  const Y = v => pad.t + (H-pad.t-pad.b)*(1 - v/max);
+  const css = getComputedStyle(document.documentElement);
+  g.font = '10px system-ui'; g.fillStyle = css.getPropertyValue('--mute'); g.strokeStyle = css.getPropertyValue('--line');
+  for (let v=0; v<=max; v+=2000){ g.beginPath(); g.moveTo(pad.l,Y(v)); g.lineTo(W-pad.r,Y(v)); g.stroke(); g.fillText((v/1000)+' GW',2,Y(v)+3); }
+  for (let ki=keys.length-1; ki>=0; ki--){
+    g.beginPath(); g.moveTo(X(0),Y(0));
+    for (let i=0;i<m;i++) g.lineTo(X(i),Y(stacks[i][ki]));
+    g.lineTo(X(m-1),Y(0)); g.closePath(); g.fillStyle = TYPES[keys[ki]].color; g.fill();
+  }
+  g.beginPath(); g.strokeStyle = css.getPropertyValue('--text'); g.lineWidth = 1.8;
+  for (let i=0;i<m;i++){ const v = load[i]; if (v==null) continue; i? g.lineTo(X(i),Y(v)) : g.moveTo(X(i),Y(v)); }
+  g.stroke();
+  g.fillStyle = css.getPropertyValue('--mute'); g.lineWidth = 1;
+  for (let i=0;i<m;i+=Math.ceil(m/6)) g.fillText(new Date(pw.unix_seconds[i]*1000).toLocaleTimeString('de-CH',{hour:'2-digit',minute:'2-digit'}), X(i)-10, H-3);
+}
+
+// ---------- Laden ----------
+// Zuerst die statischen Dateien (GitHub Pages: data/*.json), sonst der lokale Server (/api/*)
+async function api(name){
+  for (const url of ['data/'+name+'.json?t='+Date.now(), '/api/'+name]){
+    try { const r = await fetch(url,{cache:'no-store'}); if (r.ok) return await r.json(); } catch(e){}
+  }
+  throw new Error(name+' nicht erreichbar');
+}
+
+async function refresh(){
+  try{
+    const [pw, cb, inst] = await Promise.all([api('power'), api('flows'), api('installed')]);
+    const instArr = Object.fromEntries(inst.production_types.map(t=>{ const i = lastIdx(t.data); return [t.name, i>=0? t.data[i]:0]; }));
+    drawPanel(pw, instArr);
+
+    // neuester Zeitpunkt mit (fast) vollständigen Grenzdaten – 0.0 bei mehreren Ländern = noch nicht gemeldet
+    const real = cb.countries.filter(c=>BORDERS[c.name]);
+    let idx = cb.unix_seconds.length-1;
+    while (idx>0 && real.filter(c=>c.data[idx]==null || c.data[idx]===0).length > 1) idx--;
+    drawFlows(cb, idx);
+    const sum = real.reduce((s,c)=>s+(c.data[idx]||0),0)*1000;   // MW, >0 = Export
+    const el = $('kNet');
+    el.textContent = fmtMW(Math.abs(sum));
+    el.className = sum>=0 ? 'exp' : 'imp';
+    $('kNetL').textContent = sum>=0 ? 'Netto-Export' : 'Netto-Import';
+    $('stamp').textContent += ' · Grenzflüsse: ' + fmtTime(cb.unix_seconds[idx]);
+    $('err').style.display = 'none';
+  }catch(e){
+    const el = $('err'); el.style.display='block';
+    el.textContent = 'Daten konnten nicht geladen werden: ' + e.message + (location.protocol==='file:' ? ' – bitte mit "node server.js" starten und http://localhost:8080 öffnen.' : '');
+  }
+}
+refresh(); setInterval(refresh, 5*60*1000);
+addEventListener('resize', ()=>{ clearTimeout(window._rz); window._rz=setTimeout(refresh,300); });
+</script>
+</body>
+</html>
