@@ -38,6 +38,10 @@
   .err{background:#5a1d1d;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;display:none}
   .flowlabel{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:2px 8px;font-size:12px;font-weight:600;white-space:nowrap;text-align:center;transform:translate(-50%,-50%);width:max-content}
   .flowlabel small{display:block;font-weight:400;color:var(--mute)}
+  @media (max-width:800px){
+    .flowlabel{font-size:11px;padding:1px 6px;border-radius:9px;line-height:1.25}
+    .flowlabel small{font-size:10px}
+  }
   .flow{stroke-dasharray:10 14;animation:dash 1s linear infinite}
   .flow.rev{animation-direction:reverse}
   @keyframes dash{to{stroke-dashoffset:-24}}
@@ -141,7 +145,7 @@ const BORDERS = {
   Germany: {de:'Deutschland', from:[47.62,8.45], to:[48.0,8.95]},
   France : {de:'Frankreich',  from:[46.85,6.8], to:[46.9,6.05]},
   Italy  : {de:'Italien',     from:[46.05,8.85], to:[45.6,9.05]},
-  Austria: {de:'Österreich',  from:[47.20,9.60], to:[47.2,10.75]},
+  Austria: {de:'Österreich',  from:[47.20,9.60], to:[47.2,10.2]},
 };
 
 // ---------- Hilfen ----------
@@ -151,7 +155,9 @@ const fmtTime = s => new Date(s*1000).toLocaleString('de-CH',{weekday:'short',ho
 const lastIdx = arr => { for (let i=arr.length-1;i>=0;i--) if (arr[i]!=null) return i; return -1; };
 
 // ---------- Karte ----------
-const map = L.map('map',{zoomControl:true,attributionControl:true,minZoom:6,maxZoom:12}).fitBounds([[45.45,5.5],[48.1,10.9]],{padding:[10,10]});
+const map = L.map('map',{zoomControl:true,attributionControl:true,minZoom:5,maxZoom:12,zoomSnap:0.1,zoomDelta:0.5});
+const FIT=[[45.55,5.6],[48.05,10.8]];
+map.fitBounds(FIT,{padding:[6,6]});
 L.tileLayer('https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-grau/default/current/3857/{z}/{x}/{y}.jpeg',
   {attribution:'© <a href="https://www.swisstopo.admin.ch">swisstopo</a>',maxZoom:19}).addTo(map);
 const plantLayer = L.layerGroup().addTo(map);
@@ -159,11 +165,14 @@ const flowLayer = L.layerGroup().addTo(map);
 
 const state = {ratios:{}};
 
+map.on('zoomend',()=>drawPlants());
+let _w=innerWidth; addEventListener('resize',()=>{ if(Math.abs(innerWidth-_w)>40){ _w=innerWidth; map.invalidateSize(); map.fitBounds(FIT,{padding:[6,6]}); } });
+
 function drawPlants(){
   plantLayer.clearLayers();
   for (const p of PLANTS){
     const T = TYPES[p.t];
-    const r = 4 + Math.sqrt(p.mw)*0.55;
+    const r = (4 + Math.sqrt(p.mw)*0.55) * Math.max(0.45, Math.min(1.4, (map.getZoom()-5)/3));
     const ratio = state.ratios[p.t] ?? 0;
     const est = p.mw*ratio;
     L.circleMarker(p.ll,{radius:r,color:T.color,weight:1.5,fillColor:T.color,fillOpacity:.12}).addTo(plantLayer);
@@ -184,7 +193,7 @@ function drawFlows(cb, idx){
     L.polyline([b.from,b.to],{color:col,weight:w,opacity:.85,className:'flow'+(exp?'':' rev'),interactive:false}).addTo(flowLayer);
     const mid = [(b.from[0]+b.to[0])/2,(b.from[1]+b.to[1])/2];
     L.marker(b.to,{interactive:false,icon:L.divIcon({className:'',html:
-      `<div class="flowlabel" style="border-color:${col}">${b.de}<br>${fmtMW(mw)}<small>${mw<1?'–':(exp?'Export ➜':'⬅ Import')}</small></div>`})}).addTo(flowLayer);
+      `<div class="flowlabel" style="border-color:${col};transform:translate(-50%,${c.name==='Italy'?'12':'-112'}%)">${b.de}<br>${fmtMW(mw)}<small>${mw<1?'–':(exp?'Export ➜':'⬅ Import')}</small></div>`})}).addTo(flowLayer);
   }
 }
 
