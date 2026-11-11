@@ -36,7 +36,7 @@
   #map{height:100%;min-height:300px;background:var(--bg)}
   .note{font-size:11px;color:var(--mute)}
   .err{background:#5a1d1d;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;display:none}
-  .flowlabel{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:2px 8px;font-size:12px;font-weight:600;white-space:nowrap;text-align:center;transform:translate(-50%,-50%);width:max-content}
+  .flowlabel{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:2px 8px;font-size:12px;font-weight:600;white-space:nowrap;text-align:center;transform-origin:0 0;width:max-content}
   .flowlabel small{display:block;font-weight:400;color:var(--mute)}
   @media (max-width:800px){
     .flowlabel{font-size:11px;padding:1px 6px;border-radius:9px;line-height:1.25}
@@ -164,15 +164,18 @@ const plantLayer = L.layerGroup().addTo(map);
 const flowLayer = L.layerGroup().addTo(map);
 
 const state = {ratios:{}};
+// Skalierung aller Symbole mit dem Kartenzoom (Kreise, Pfeile, Schilder bleiben im Grössenverhältnis)
+const labelScale = () => Math.max(0.85, Math.min(1.25, (map.getZoom()-4)/3));
+const scaleNow = () => Math.max(0.45, Math.min(1.4, (map.getZoom()-5)/3));
 
-map.on('zoomend',()=>drawPlants());
+map.on('zoomend',()=>{ drawPlants(); if (state.flow) drawFlows(state.flow.cb, state.flow.idx); });
 let _w=innerWidth; addEventListener('resize',()=>{ if(Math.abs(innerWidth-_w)>40){ _w=innerWidth; map.invalidateSize(); map.fitBounds(FIT,{padding:[6,6]}); } });
 
 function drawPlants(){
   plantLayer.clearLayers();
   for (const p of PLANTS){
     const T = TYPES[p.t];
-    const r = (4 + Math.sqrt(p.mw)*0.55) * Math.max(0.45, Math.min(1.4, (map.getZoom()-5)/3));
+    const r = (4 + Math.sqrt(p.mw)*0.55) * scaleNow();
     const ratio = state.ratios[p.t] ?? 0;
     const est = p.mw*ratio;
     L.circleMarker(p.ll,{radius:r,color:T.color,weight:1.5,fillColor:T.color,fillOpacity:.12}).addTo(plantLayer);
@@ -188,12 +191,12 @@ function drawFlows(cb, idx){
     const b = BORDERS[c.name]; if (!b) continue;
     const v = c.data[idx]; if (v==null) continue;   // GW, >0 = Export aus der CH
     const exp = v > 0, mw = Math.abs(v)*1000;
-    const w = 2 + Math.min(10, Math.abs(v)*2.5);
+    const w = (2 + Math.min(10, Math.abs(v)*2.5)) * scaleNow();
     const col = exp ? '#4cd68a' : '#ff8a3d';
     L.polyline([b.from,b.to],{color:col,weight:w,opacity:.85,className:'flow'+(exp?'':' rev'),interactive:false}).addTo(flowLayer);
     const mid = [(b.from[0]+b.to[0])/2,(b.from[1]+b.to[1])/2];
     L.marker(b.to,{interactive:false,icon:L.divIcon({className:'',html:
-      `<div class="flowlabel" style="border-color:${col};transform:translate(-50%,${c.name==='Italy'?'12':'-112'}%)">${b.de}<br>${fmtMW(mw)}<small>${mw<1?'–':(exp?'Export ➜':'⬅ Import')}</small></div>`})}).addTo(flowLayer);
+      `<div class="flowlabel" style="border-color:${col};transform:scale(${labelScale().toFixed(2)}) translate(-50%,${c.name==='Italy'?'12':'-112'}%)">${b.de}<br>${fmtMW(mw)}<small>${mw<1?'–':(exp?'Export ➜':'⬅ Import')}</small></div>`})}).addTo(flowLayer);
   }
 }
 
@@ -278,6 +281,7 @@ async function refresh(){
     const real = cb.countries.filter(c=>BORDERS[c.name]);
     let idx = cb.unix_seconds.length-1;
     while (idx>0 && real.filter(c=>c.data[idx]==null || c.data[idx]===0).length > 1) idx--;
+    state.flow = {cb, idx};
     drawFlows(cb, idx);
     const sum = real.reduce((s,c)=>s+(c.data[idx]||0),0)*1000;   // MW, >0 = Export
     const el = $('kNet');
